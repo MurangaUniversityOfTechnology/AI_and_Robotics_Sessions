@@ -20,6 +20,16 @@ from mediapipe.tasks.python import vision
 pyautogui.FAILSAFE = True
 
 
+HAND_CONNECTIONS = [
+	(0, 1), (1, 2), (2, 3), (3, 4),
+	(0, 5), (5, 6), (6, 7), (7, 8),
+	(5, 9), (9, 10), (10, 11), (11, 12),
+	(9, 13), (13, 14), (14, 15), (15, 16),
+	(13, 17), (17, 18), (18, 19), (19, 20),
+	(0, 17),
+]
+
+
 @dataclass
 class GestureAction:
 	"""Represents a gesture name and the desktop action it triggers."""
@@ -34,10 +44,38 @@ def is_finger_extended(landmarks, tip_id: int, pip_id: int) -> bool:
 	return landmarks[tip_id].y < landmarks[pip_id].y
 
 
-def classify_gesture(landmarks) -> str:
+def is_thumb_extended(landmarks, handedness_label: str | None = None) -> bool:
+	"""Return True when the thumb is extended, accounting for mirrored preview and hand side."""
+
+	if handedness_label == "Left":
+		return landmarks[4].x < landmarks[3].x
+	if handedness_label == "Right":
+		return landmarks[4].x > landmarks[3].x
+	return abs(landmarks[4].x - landmarks[3].x) > 0.03
+
+
+def draw_hand(frame, landmarks) -> None:
+	"""Draw hand landmarks and skeleton using OpenCV."""
+
+	h, w = frame.shape[:2]
+	for start, end in HAND_CONNECTIONS:
+		p1 = landmarks[start]
+		p2 = landmarks[end]
+		cv2.line(
+			frame,
+			(int(p1.x * w), int(p1.y * h)),
+			(int(p2.x * w), int(p2.y * h)),
+			(255, 0, 0),
+			2,
+		)
+	for landmark in landmarks:
+		cv2.circle(frame, (int(landmark.x * w), int(landmark.y * h)), 5, (0, 255, 0), -1)
+
+
+def classify_gesture(landmarks, handedness_label: str | None = None) -> str:
 	"""Classify the current hand pose into a simple named gesture."""
 
-	thumb_extended = landmarks[4].x > landmarks[3].x
+	thumb_extended = is_thumb_extended(landmarks, handedness_label)
 	index_extended = is_finger_extended(landmarks, 8, 6)
 	middle_extended = is_finger_extended(landmarks, 12, 10)
 	ring_extended = is_finger_extended(landmarks, 16, 14)
@@ -47,6 +85,8 @@ def classify_gesture(landmarks) -> str:
 		return "Open Palm"
 	if not any((thumb_extended, index_extended, middle_extended, ring_extended, pinky_extended)):
 		return "Fist"
+	if index_extended and not any((thumb_extended, middle_extended, ring_extended, pinky_extended)):
+		return "wantam"
 	if index_extended and middle_extended and not any((thumb_extended, ring_extended, pinky_extended)):
 		return "Two Fingers Extended"
 	if thumb_extended and not any((index_extended, middle_extended, ring_extended, pinky_extended)):
@@ -80,9 +120,13 @@ def build_action_map() -> dict[str, GestureAction]:
 	def mute_toggle() -> None:
 		pyautogui.press("volumemute")
 
+	def reboot_pc() -> None:
+		subprocess.Popen(["reboot"])
+
 	return {
 		"Open Palm": GestureAction("Show Desktop", show_desktop),
 		"Fist": GestureAction("Open Brave Browser", open_brave),
+		"wantam": GestureAction("Reboot PC", reboot_pc),
 		"Two Fingers Extended": GestureAction("Open Terminal", open_terminal),
 		"Thumbs Up": GestureAction("Open ChatGPT", open_chatgpt),
 		"Unknown": GestureAction("Volume Up", volume_up),
@@ -134,6 +178,10 @@ def main() -> None:
 		cap = cv2.VideoCapture(0)
 		if not cap.isOpened():
 			raise RuntimeError("Could not open webcam.")
+		cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+		cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+		cv2.namedWindow("Local Hand Gesture Desktop Controller", cv2.WINDOW_NORMAL)
+		cv2.resizeWindow("Local Hand Gesture Desktop Controller", 1280, 900)
 
 		try:
 			while True:
@@ -156,7 +204,13 @@ def main() -> None:
 				if results.hand_landmarks:
 					# Use the first detected hand and classify its gesture.
 					hand_landmarks = results.hand_landmarks[0]
-					current_gesture = classify_gesture(hand_landmarks)
+					draw_hand(frame, hand_landmarks)
+					handedness_label = None
+					if getattr(results, "handedness", None):
+						first_hand = results.handedness[0]
+						if first_hand:
+							handedness_label = first_hand[0].category_name
+					current_gesture = classify_gesture(hand_landmarks, handedness_label)
 					gesture_action = action_map.get(current_gesture)
 					current_action_name = gesture_action.name if gesture_action else "No mapped action"
 
